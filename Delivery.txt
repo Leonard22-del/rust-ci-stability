@@ -1,0 +1,27 @@
+Title: Stabilize Rust CI by mitigating OOM and disk pressure
+
+Summary:
+Intermittent Rust cargo build/test failures were occurring due to
+memory exhaustion during parallel compilation and disk pressure
+from stale build artifacts.
+
+Evidence:
+- CI diagnostics showed limited RAM and disk on the runner
+- Failures ended with "Killed" / LLVM crashes consistent with OOM
+- Large target/ directories contributed to disk pressure
+
+Changes:
+- Added GitHub Actions workflow with system diagnostics
+- Cleaned stale build artifacts before builds
+- Limited cargo parallelism (CARGO_BUILD_JOBS=2, test-threads=1)
+- Added repeat test execution to validate stability
+- Added persistent repo config via .cargo/config.toml
+
+Validation:
+- CI workflow passes consistently
+- cargo test executed multiple times without failure
+- No OOM or disk saturation observed in post-run diagnostics
+
+Notes:
+- Swapfile is best-effort on GitHub-hosted runners
+- Persistent swap is recommended for self-hosted runners
