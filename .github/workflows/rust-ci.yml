@@ -9,10 +9,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     env:
-      # Recommended: keep it low first, then tune up if safe
       CARGO_BUILD_JOBS: "2"
+      RUST_TEST_THREADS: "1"
       CARGO_TERM_COLOR: always
 
     steps:
@@ -28,6 +29,7 @@ jobs:
           nproc || true
           free -h || true
           df -h || true
+          swapon --show || true
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -39,49 +41,72 @@ jobs:
           rustc -V
           cargo -V
 
-      - name: Clean stale build artifacts
+      # ✅ Make disk proof explicit: before + after
+      - name: Free disk space (stale build artifacts + caches)
         shell: bash
         run: |
-          set -euo pipefail
-          echo "=== CLEANUP ==="
+          set -euxo pipefail
+          echo "=== DISK BEFORE CLEANUP ==="
+          df -h
+
+          # Repo artifacts
           rm -rf target || true
           cargo clean || true
-          df -h || true
 
-      # Swap is best-effort on GitHub-hosted runners. If it fails, the job continues.
-      - name: Add swapfile (best effort)
+          # Optional: cargo caches can be huge on runners
+          rm -rf ~/.cargo/registry ~/.cargo/git || true
+
+          echo "=== DISK AFTER CLEANUP ==="
+          df -h
+
+      # ✅ Make swap deterministic + prove it’s enabled
+      - name: Add swapfile (required mitigation)
         shell: bash
         run: |
-          set -euo pipefail
-          echo "=== SWAP (BEST EFFORT) ==="
-          if sudo fallocate -l 8G /swapfile 2>/dev/null || sudo dd if=/dev/zero of=/swapfile bs=1M count=8192; then
-            sudo chmod 600 /swapfile
-            sudo mkswap /swapfile
-            sudo swapon /swapfile || true
-          fi
-          swapon --show || true
+          set -euxo pipefail
+          echo "=== SWAP SETUP ==="
           free -h || true
+          swapon --show || true
+
+          # Avoid conflicts
+          sudo swapoff -a || true
+          sudo rm -f /swapfile || true
+
+          # 4G is usually enough; 8G can be too large if disk is tight
+          SWAP_GB=4
+
+          # Create swapfile
+          sudo fallocate -l ${SWAP_GB}G /swapfile || sudo dd if=/dev/zero of=/swapfile bs=1M count=$((SWAP_GB*1024))
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+
+          echo "=== SWAP ENABLED ==="
+          swapon --show
+          free -h
 
       - name: Build (limited parallelism)
         shell: bash
         run: |
-          set -euo pipefail
-          cargo build -j 2
+          set -euxo pipefail
+          echo "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS"
+          cargo build -j 2 -v
 
       - name: Test (limited parallelism)
         shell: bash
         run: |
-          set -euo pipefail
-          cargo test -j 2 -- --test-threads=1
+          set -euxo pipefail
+          echo "RUST_TEST_THREADS=$RUST_TEST_THREADS"
+          cargo test -j 2 -v -- --test-threads=1
 
+      # ✅ Repeat without deleting target every time
       - name: Repeat tests (stability check)
         shell: bash
         run: |
-          set -euo pipefail
+          set -euxo pipefail
           for i in 1 2 3; do
             echo "=== STABILITY RUN $i ==="
-            rm -rf target
-            cargo test -j 2 -- --test-threads=1
+            cargo test -j 2 -v -- --test-threads=1
           done
 
       - name: Diagnostics (post)
@@ -92,6 +117,7 @@ jobs:
           echo "=== SYSTEM INFO (POST) ==="
           free -h || true
           df -h || true
+          swapon --show || true
 
           echo "=== OOM CHECK (POST) ==="
           dmesg -T | tail -n 250 | egrep -i "out of memory|oom|killed process" || true
